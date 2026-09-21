@@ -2,9 +2,29 @@
 
 import Link from 'next/link'
 import { use, useEffect, useMemo, useState } from 'react'
-import { ElementCard, type StudioElement } from '@/components/ElementCard'
+import { AuditLog } from '@/components/AuditLog'
+import { AutonomySelector } from '@/components/AutonomySelector'
+import { DocumentsPanel } from '@/components/DocumentsPanel'
+import { EditDialog } from '@/components/EditDialog'
+import {
+  ElementCard,
+  type ElementCitation,
+  type StudioElement,
+} from '@/components/ElementCard'
+import { ExplainPopover } from '@/components/ExplainPopover'
+import { PriorityMatrix } from '@/components/PriorityMatrix'
+import { RegenerateDialog } from '@/components/RegenerateDialog'
+import {
+  autoAccept,
+  logSuggestionDismissed,
+  logSuggestionUsed,
+  undoAuto,
+  type ActionCtx,
+} from '@/lib/elementActions'
 import { generateElements } from '@/lib/generate'
+import { runPipeline } from '@/lib/pipeline'
 import type { ElementKind } from '@/lib/schemas'
+import { fetchSuggestions, type Suggestion } from '@/lib/suggest'
 import { createClient } from '@/lib/supabase/client'
 
 type SessionInfo = {
@@ -19,6 +39,61 @@ const COLUMNS: { type: ElementKind; title: string; action: string }[] = [
   { type: 'journey', title: 'Journeys', action: 'Générer 3 journeys' },
   { type: 'feature', title: 'Features', action: 'Générer 3 features' },
 ]
+
+type NestedDocument = { filename?: string | null } | { filename?: string | null }[] | null
+
+type NestedChunk = {
+  content?: string | null
+  page?: number | null
+  documents?: NestedDocument
+} | null
+
+type NestedSource = {
+  chunk_id?: string | null
+  chunks?: NestedChunk
+}
+
+function filenameFrom(documents: NestedDocument): string | undefined {
+  if (!documents) return undefined
+  if (Array.isArray(documents)) return documents[0]?.filename ?? undefined
+  return documents.filename ?? undefined
+}
+
+function mapLoadedElement(row: StudioElement & { element_sources?: NestedSource[] | null }): StudioElement {
+  const sources = row.element_sources ?? []
+  const citations: ElementCitation[] = sources.flatMap((source, index) => {
+    const chunkId = source.chunk_id
+    if (!chunkId) return []
+    const chunk = source.chunks
+    const excerpt = (chunk?.content ?? '').slice(0, 300)
+    return [
+      {
+        ref: `S${index + 1}`,
+        chunk_id: chunkId,
+        filename: filenameFrom(chunk?.documents ?? null) ?? null,
+        page: chunk?.page ?? null,
+        excerpt,
+      },
+    ]
+  })
+
+  return { ...row, citations }
+}
+
+function asStudioElement(row: Record<string, unknown>, citations?: ElementCitation[]): StudioElement {
+  return {
+    id: String(row.id),
+    type: String(row.type ?? ''),
+    content: (row.content as Record<string, unknown> | null) ?? null,
+    source: (row.source as string | null) ?? null,
+    status: (row.status as string | null) ?? null,
+    confidence: typeof row.confidence === 'number' ? row.confidence : null,
+    reasoning: (row.reasoning as string | null) ?? null,
+    priority_impact: typeof row.priority_impact === 'number' ? row.priority_impact : null,
+    priority_effort: typeof row.priority_effort === 'number' ? row.priority_effort : null,
+    citations,
+  }
+}
 
 export default function SessionPage({
   params,
@@ -37,6 +112,29 @@ export default function SessionPage({
   const [generating, setGenerating] = useState<Partial<Record<ElementKind, boolean>>>({})
   const [errors, setErrors] = useState<Partial<Record<ElementKind, string | null>>>({})
   const [invalidCounts, setInvalidCounts] = useState<Partial<Record<ElementKind, number>>>({})
+  const [toast, setToast] = useState<{ message: string; kind: 'ok' | 'err' } | null>(null)
+  const [editState, setEditState] = useState<
+    | { mode: 'create'; type: ElementKind; suggestion?: Suggestion }
+    | { mode: 'edit'; element: StudioElement }
+    | null
+  >(null)
+  const [regenElement, setRegenElement] = useState<StudioElement | null>(null)
+  const [explainElement, setExplainElement] = useState<StudioElement | null>(null)
+  const [autoAcceptedIds, setAutoAcceptedIds] = useState<Set<string>>(new Set())
+  const [auditKey, setAuditKey] = useState(0)
+  const [suggestions, setSuggestions] = useState<Partial<Record<ElementKind, Suggestion[]>>>({})
+  const [suggesting, setSuggesting] = useState<Partial<Record<ElementKind, boolean>>>({})
+  const [suggestErrors, setSuggestErrors] = useState<Partial<Record<ElementKind, string | null>>>({})
+  const [pipelineRunning, setPipelineRunning] = useState(false)
+  const [pipelineStep, setPipelineStep] = useState<string | null>(null)
+  const [pipelineError, setPipelineError] = useState<string | null>(null)
+  const [pipelineBanner, setPipelineBanner] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(null), 3200)
+    return () => window.clearTimeout(timer)
+  }, [toast])
 
   useEffect(() => {
     let cancelled = false
@@ -46,21 +144,23 @@ export default function SessionPage({
       setLoadError(null)
       const supabase = createClient()
 
-      const [{ data: sessionData, error: sessionError }, { data: elementData, error: elementError }] =
-        await Promise.all([
-          supabase
-            .from('sessions')
-            .select('id, title, brief, mode')
-            .eq('id', id)
-            .single(),
-          supabase
-            .from('elements')
-            .select(
-              'id, type, content, source, status, confidence, reasoning, priority_impact, priority_effort, position'
-            )
-            .eq('session_id', id)
-            .order('position', { ascending: true }),
-        ])
+      const [
+        { data: sessionData, error: sessionError },
+        { data: elementData, error: elementError },
+        { data: autoEvents },
+      ] = await Promise.all([
+        supabase.from('sessions').select('id, title, brief, mode').eq('id', id).single(),
+        supabase
+          .from('elements')
+          .select('*, element_sources(chunk_id, chunks(content, page, documents(filename)))')
+          .eq('session_id', id)
+          .order('position', { ascending: true }),
+        supabase
+          .from('events')
+          .select('element_id')
+          .eq('session_id', id)
+          .eq('event_type', 'card_auto_accepted'),
+      ])
 
       if (cancelled) return
 
@@ -73,7 +173,18 @@ export default function SessionPage({
       const row = sessionData as SessionInfo
       setSession(row)
       setBrief(row.brief ?? '')
-      setElements((elementData as StudioElement[] | null) ?? [])
+      setElements(
+        ((elementData as (StudioElement & { element_sources?: NestedSource[] | null })[] | null) ?? []).map(
+          mapLoadedElement
+        )
+      )
+      setAutoAcceptedIds(
+        new Set(
+          ((autoEvents as { element_id?: string | null }[] | null) ?? [])
+            .map((item) => item.element_id)
+            .filter((value): value is string => Boolean(value))
+        )
+      )
       if (elementError) setLoadError(elementError.message)
       setLoading(false)
     }
@@ -91,6 +202,47 @@ export default function SessionPage({
       feature: elements.filter((el) => el.type === 'feature'),
     }
   }, [elements])
+
+  const ctx: ActionCtx = useMemo(
+    () => ({
+      sessionId: id,
+      mode: session?.mode === 'draft' || session?.mode === 'act' ? session.mode : 'suggest',
+    }),
+    [id, session?.mode]
+  )
+
+  const busy =
+    pipelineRunning ||
+    Object.values(generating).some(Boolean) ||
+    Object.values(suggesting).some(Boolean)
+
+  function showToast(message: string, kind: 'ok' | 'err') {
+    setToast({ message, kind })
+  }
+
+  function bumpAudit() {
+    setAuditKey((value) => value + 1)
+  }
+
+  function mergeRow(row: Record<string, unknown>, citations?: ElementCitation[]) {
+    const rowId = String(row.id)
+    setElements((prev) => {
+      const current = prev.find((item) => item.id === rowId)
+      const next = asStudioElement(row, citations ?? current?.citations)
+      if (!current) return [...prev, next]
+      return prev.map((item) =>
+        item.id === rowId ? { ...item, ...next, citations: citations ?? item.citations } : item
+      )
+    })
+  }
+
+  function markAutoAccepted(elementId: string) {
+    setAutoAcceptedIds((prev) => {
+      const next = new Set(prev)
+      next.add(elementId)
+      return next
+    })
+  }
 
   async function saveBrief() {
     setSaving(true)
@@ -112,12 +264,28 @@ export default function SessionPage({
     setErrors((prev) => ({ ...prev, [type]: null }))
     setInvalidCounts((prev) => ({ ...prev, [type]: 0 }))
 
+    const pending: Promise<void>[] = []
+
     await generateElements({
       sessionId: id,
       type,
       count: 3,
       onElement: (el: StudioElement) => {
-        setElements((prev) => (prev.some((item) => item.id === el.id) ? prev : [...prev, el]))
+        if (ctx.mode !== 'act') {
+          setElements((prev) => (prev.some((item) => item.id === el.id) ? prev : [...prev, el]))
+          return
+        }
+        pending.push(
+          (async () => {
+            try {
+              const row = await autoAccept(ctx, el.id)
+              mergeRow({ ...(row as Record<string, unknown>) }, el.citations)
+              markAutoAccepted(el.id)
+            } catch {
+              setElements((prev) => (prev.some((item) => item.id === el.id) ? prev : [...prev, el]))
+            }
+          })()
+        )
       },
       onInvalid: () => {
         setInvalidCounts((prev) => ({ ...prev, [type]: (prev[type] ?? 0) + 1 }))
@@ -127,7 +295,72 @@ export default function SessionPage({
       },
     })
 
+    await Promise.all(pending)
+    bumpAudit()
     setGenerating((prev) => ({ ...prev, [type]: false }))
+  }
+
+  async function suggest(type: ElementKind) {
+    setSuggesting((prev) => ({ ...prev, [type]: true }))
+    setSuggestErrors((prev) => ({ ...prev, [type]: null }))
+    try {
+      const items = await fetchSuggestions(id, type, 4)
+      setSuggestions((prev) => ({ ...prev, [type]: items }))
+      bumpAudit()
+    } catch (e) {
+      setSuggestErrors((prev) => ({
+        ...prev,
+        [type]: e instanceof Error ? e.message : 'Suggestions impossibles',
+      }))
+    } finally {
+      setSuggesting((prev) => ({ ...prev, [type]: false }))
+    }
+  }
+
+  function removeSuggestion(type: ElementKind, label: string) {
+    setSuggestions((prev) => ({
+      ...prev,
+      [type]: (prev[type] ?? []).filter((item) => item.label !== label),
+    }))
+  }
+
+  async function startPipeline() {
+    if (!brief.trim()) return
+    if (
+      elements.length > 0 &&
+      !confirm('Des éléments existent déjà. De nouveaux seront ajoutés. Continuer ?')
+    ) {
+      return
+    }
+    setPipelineRunning(true)
+    setPipelineError(null)
+    setPipelineBanner(null)
+    setPipelineStep('Étape 1/3 : Personas...')
+    const result = await runPipeline(ctx, {
+      onStep: (label, index, total) => {
+        setPipelineStep(`Étape ${index + 1}/${total} : ${label}...`)
+      },
+      onElement: (el: StudioElement) => {
+        mergeRow(el as unknown as Record<string, unknown>, el.citations)
+        if (el.id && el.status === 'validated') markAutoAccepted(el.id)
+      },
+      onError: (message) => setPipelineError(message),
+    })
+    if (result.ok) {
+      const n = Object.values(result.counts).reduce((sum, value) => sum + value, 0)
+      setPipelineBanner(
+        `Le pipeline a créé ${n} éléments sans validation humaine. Relis-les avant de les utiliser.`
+      )
+    }
+    setPipelineRunning(false)
+    setPipelineStep(null)
+    bumpAudit()
+  }
+
+  async function undoAutoAccepted(elementId: string) {
+    const row = await undoAuto(ctx, elementId)
+    bumpAudit()
+    return row
   }
 
   if (loading) {
@@ -149,14 +382,15 @@ export default function SessionPage({
     )
   }
 
+  const suggestMode = ctx.mode === 'suggest'
+  const actMode = ctx.mode === 'act'
+  const briefEmpty = !brief.trim()
+
   return (
     <main className="min-h-full bg-zinc-50 text-zinc-900">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-10 px-6 py-10">
         <header className="space-y-3">
-          <Link
-            href="/sessions"
-            className="text-sm font-medium text-indigo-700 hover:text-indigo-800"
-          >
+          <Link href="/sessions" className="text-sm font-medium text-indigo-700 hover:text-indigo-800">
             ← Sessions
           </Link>
           <div className="flex flex-wrap items-end justify-between gap-4">
@@ -164,12 +398,38 @@ export default function SessionPage({
               <h1 className="text-3xl font-semibold tracking-tight">
                 {session.title?.trim() || `Session ${session.id.slice(0, 8)}`}
               </h1>
-              <p className="mt-1 text-sm text-zinc-500">
-                Mode {session.mode ?? 'suggest'}
-              </p>
             </div>
+            <AutonomySelector
+              ctx={ctx}
+              disabled={busy}
+              onChanged={(mode) => {
+                setSession((prev) => (prev ? { ...prev, mode } : prev))
+                bumpAudit()
+              }}
+              onToast={showToast}
+            />
           </div>
         </header>
+
+        {actMode ? (
+          <AuditLog
+            sessionId={session.id}
+            elements={elements}
+            refreshKey={auditKey}
+            autoAcceptedIds={autoAcceptedIds}
+            onUndo={(elementId) => {
+              void (async () => {
+                try {
+                  const row = await undoAutoAccepted(elementId)
+                  mergeRow(row as Record<string, unknown>)
+                  showToast('Élément annulé.', 'ok')
+                } catch (e) {
+                  showToast(e instanceof Error ? e.message : 'Annulation impossible', 'err')
+                }
+              })()
+            }}
+          />
+        ) : null}
 
         <section className="rounded-2xl border border-zinc-200 bg-white p-6">
           <label htmlFor="brief" className="text-sm font-medium text-zinc-800">
@@ -190,7 +450,7 @@ export default function SessionPage({
             <button
               type="button"
               onClick={saveBrief}
-              disabled={saving}
+              disabled={saving || busy}
               className="h-10 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-60"
             >
               {saving ? 'Enregistrement…' : 'Enregistrer'}
@@ -202,36 +462,138 @@ export default function SessionPage({
 
         {loadError ? <p className="text-sm text-red-600">{loadError}</p> : null}
 
+        <details className="rounded-2xl border border-zinc-200 bg-white p-6">
+          <summary className="cursor-pointer text-sm font-semibold text-zinc-900">
+            Documents sources
+          </summary>
+          <div className="mt-5">
+            <DocumentsPanel key={session.id} sessionId={session.id} />
+          </div>
+        </details>
+
+        {actMode ? (
+          <section className="rounded-2xl border border-zinc-200 bg-white p-6">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void startPipeline()}
+                disabled={busy || briefEmpty}
+                className="h-10 rounded-lg bg-indigo-600 px-4 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+              >
+                Lancer le pipeline complet
+              </button>
+              {pipelineRunning ? (
+                <span className="inline-flex items-center gap-2 text-sm text-zinc-600">
+                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />
+                  {pipelineStep ?? 'Pipeline en cours…'}
+                </span>
+              ) : null}
+              {briefEmpty ? (
+                <p className="text-sm text-zinc-500">Enregistre un brief pour lancer le pipeline.</p>
+              ) : null}
+            </div>
+            {pipelineError ? <p className="mt-3 text-sm text-red-600">{pipelineError}</p> : null}
+            {pipelineBanner ? (
+              <div className="mt-4 flex items-start justify-between gap-3 rounded-xl bg-violet-50 px-4 py-3 text-sm text-violet-900">
+                <p>{pipelineBanner}</p>
+                <button
+                  type="button"
+                  onClick={() => setPipelineBanner(null)}
+                  className="shrink-0 text-xs font-medium text-violet-700 hover:text-violet-900"
+                >
+                  Fermer
+                </button>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
         <section className="grid grid-cols-1 gap-8 lg:grid-cols-3">
           {COLUMNS.map((column) => {
             const isGenerating = Boolean(generating[column.type])
+            const isSuggesting = Boolean(suggesting[column.type])
             const invalidCount = invalidCounts[column.type] ?? 0
             const error = errors[column.type]
+            const suggestError = suggestErrors[column.type]
             const items = grouped[column.type]
+            const chips = suggestions[column.type] ?? []
 
             return (
               <div key={column.type} className="flex flex-col gap-4">
                 <div className="flex items-end justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold tracking-tight">{column.title}</h2>
-                    <p className="text-xs text-zinc-500">{items.length} élément{items.length > 1 ? 's' : ''}</p>
+                    <p className="text-xs text-zinc-500">
+                      {items.length} élément{items.length > 1 ? 's' : ''}
+                    </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void generate(column.type)}
-                    disabled={isGenerating}
-                    className="h-10 shrink-0 rounded-lg bg-indigo-600 px-3 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-60"
-                  >
-                    {isGenerating ? 'Génération…' : column.action}
-                  </button>
+                  {suggestMode ? (
+                    <button
+                      type="button"
+                      onClick={() => void suggest(column.type)}
+                      disabled={busy}
+                      className="h-10 shrink-0 rounded-lg bg-indigo-600 px-3 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-60"
+                    >
+                      {isSuggesting ? 'Suggestion…' : 'Suggérer des pistes'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void generate(column.type)}
+                      disabled={busy}
+                      className="h-10 shrink-0 rounded-lg bg-indigo-600 px-3 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:opacity-60"
+                    >
+                      {isGenerating ? 'Génération…' : column.action}
+                    </button>
+                  )}
                 </div>
 
                 {error ? <p className="text-sm text-red-600">{error}</p> : null}
+                {suggestError ? <p className="text-sm text-red-600">{suggestError}</p> : null}
                 {invalidCount > 0 ? (
                   <p className="text-xs text-zinc-500">
                     {invalidCount} ligne{invalidCount > 1 ? 's' : ''} ignorée
                     {invalidCount > 1 ? 's' : ''}
                   </p>
+                ) : null}
+
+                {chips.length > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    {chips.map((chip) => (
+                      <div
+                        key={chip.label}
+                        className="flex items-start justify-between gap-2 rounded-xl border border-violet-100 bg-violet-50 px-3 py-2"
+                      >
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            void logSuggestionUsed(ctx, { type: column.type, label: chip.label })
+                            setEditState({ mode: 'create', type: column.type, suggestion: chip })
+                            removeSuggestion(column.type, chip.label)
+                            bumpAudit()
+                          }}
+                          className="min-w-0 text-left disabled:opacity-50"
+                        >
+                          <p className="text-sm font-medium text-violet-900">{chip.label}</p>
+                          <p className="text-xs text-zinc-500">{chip.hint}</p>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            void logSuggestionDismissed(ctx, { type: column.type, label: chip.label })
+                            removeSuggestion(column.type, chip.label)
+                            bumpAudit()
+                          }}
+                          className="shrink-0 text-xs font-medium text-zinc-400 hover:text-zinc-700 disabled:opacity-50"
+                          aria-label="Retirer la piste"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 ) : null}
 
                 <div className="flex flex-col gap-4">
@@ -241,14 +603,102 @@ export default function SessionPage({
                     </p>
                   ) : null}
                   {items.map((element) => (
-                    <ElementCard key={element.id} element={element} />
+                    <ElementCard
+                      key={element.id}
+                      element={element}
+                      ctx={ctx}
+                      locked={busy}
+                      autoAccepted={autoAcceptedIds.has(element.id)}
+                      onUpdated={(row) => {
+                        mergeRow(row)
+                        bumpAudit()
+                      }}
+                      onEdit={() => setEditState({ mode: 'edit', element })}
+                      onRegenerate={() => setRegenElement(element)}
+                      onExplain={() => setExplainElement(element)}
+                      onToast={showToast}
+                      onUndoAuto={() => undoAutoAccepted(element.id)}
+                    />
                   ))}
                 </div>
+
+                {column.type === 'feature' ? (
+                  <details className="rounded-2xl border border-zinc-200 bg-white p-4">
+                    <summary className="cursor-pointer text-sm font-semibold text-zinc-900">
+                      Matrice impact / effort
+                    </summary>
+                    <div className="mt-4">
+                      <PriorityMatrix
+                        ctx={ctx}
+                        features={grouped.feature}
+                        onUpdated={(row) => {
+                          mergeRow(row)
+                          bumpAudit()
+                        }}
+                        onToast={showToast}
+                      />
+                    </div>
+                  </details>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={() => setEditState({ mode: 'create', type: column.type })}
+                  disabled={busy}
+                  className="h-10 rounded-lg border border-dashed border-zinc-300 text-sm font-medium text-zinc-700 hover:border-indigo-300 hover:text-indigo-700 disabled:opacity-50"
+                >
+                  + Ajouter à la main
+                </button>
               </div>
             )
           })}
         </section>
       </div>
+
+      {editState ? (
+        <EditDialog
+          ctx={ctx}
+          type={editState.mode === 'create' ? editState.type : (editState.element.type as ElementKind)}
+          element={editState.mode === 'edit' ? editState.element : null}
+          suggestion={editState.mode === 'create' ? editState.suggestion : undefined}
+          onClose={() => setEditState(null)}
+          onSaved={(row) => {
+            mergeRow(row)
+            bumpAudit()
+          }}
+          onToast={showToast}
+        />
+      ) : null}
+
+      {regenElement ? (
+        <RegenerateDialog
+          elementId={regenElement.id}
+          onClose={() => setRegenElement(null)}
+          onDone={(row) => {
+            mergeRow(row, row.citations)
+            bumpAudit()
+            showToast('Carte régénérée.', 'ok')
+          }}
+        />
+      ) : null}
+
+      {explainElement ? (
+        <ExplainPopover
+          ctx={ctx}
+          element={elements.find((item) => item.id === explainElement.id) ?? explainElement}
+          onClose={() => setExplainElement(null)}
+        />
+      ) : null}
+
+      {toast ? (
+        <div
+          className={`fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg px-4 py-2 text-sm font-medium shadow-lg ${
+            toast.kind === 'ok' ? 'bg-green-700 text-white' : 'bg-red-600 text-white'
+          }`}
+        >
+          {toast.message}
+        </div>
+      ) : null}
     </main>
   )
 }

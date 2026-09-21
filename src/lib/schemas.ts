@@ -1,7 +1,9 @@
 import { z } from 'zod'
 
 // Champs communs : stockés dans les colonnes `confidence` et `reasoning` de `elements`
+// `source_ids` (ex: ["S1","S3"]) sert à remplir la table `element_sources` (citations)
 const meta = {
+  source_ids: z.array(z.string()).default([]),
   confidence: z.number().min(0).max(1),
   reasoning: z.string().min(10),
 }

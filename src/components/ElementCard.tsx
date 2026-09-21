@@ -1,5 +1,16 @@
 'use client'
 
+import { useState } from 'react'
+import { setStatus, type ActionCtx } from '@/lib/elementActions'
+
+export type ElementCitation = {
+  ref: string
+  chunk_id: string
+  filename?: string | null
+  page: number | null
+  excerpt: string
+}
+
 export type StudioElement = {
   id: string
   type: string
@@ -10,6 +21,7 @@ export type StudioElement = {
   reasoning: string | null
   priority_impact: number | null
   priority_effort: number | null
+  citations?: ElementCitation[]
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -171,13 +183,74 @@ function FeatureBody({
   )
 }
 
-export function ElementCard({ element }: { element: StudioElement }) {
+export function ElementCard({
+  element,
+  ctx,
+  onUpdated,
+  onEdit,
+  onRegenerate,
+  onExplain,
+  onToast,
+  locked,
+  autoAccepted,
+  onUndoAuto,
+}: {
+  element: StudioElement
+  ctx: ActionCtx
+  onUpdated: (row: Record<string, unknown>) => void
+  onEdit: () => void
+  onRegenerate: () => void
+  onExplain: () => void
+  onToast: (message: string, kind: 'ok' | 'err') => void
+  locked?: boolean
+  autoAccepted?: boolean
+  onUndoAuto?: () => Promise<unknown>
+}) {
   const content = asRecord(element.content)
   const confidence = Math.round(Math.min(Math.max(element.confidence ?? 0, 0), 1) * 100)
-  const status = element.status ?? ''
+  const status = element.status ?? 'proposed'
+  const citations = element.citations ?? []
+  const [openRef, setOpenRef] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const openCitation = citations.find((citation) => citation.ref === openRef)
+  const rejected = status === 'rejected'
+  const showRegen = ctx.mode !== 'suggest'
+  const disabled = busy || Boolean(locked)
+  const showAuto =
+    Boolean(autoAccepted) && status === 'validated' && element.source === 'ai_generated'
+
+  async function run(action: () => Promise<unknown>, success: string) {
+    setBusy(true)
+    try {
+      const row = await action()
+      if (row && typeof row === 'object') onUpdated(row as Record<string, unknown>)
+      onToast(success, 'ok')
+    } catch (e) {
+      onToast(e instanceof Error ? e.message : 'Action impossible', 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function requestRegenerate() {
+    if (element.source === 'human_edited') {
+      if (!confirm('Régénérer écrasera les modifications humaines. Continuer ?')) return
+    }
+    onRegenerate()
+  }
+
+  const btn =
+    'rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-50'
+  const primary = `${btn} bg-indigo-600 text-white hover:bg-indigo-700`
+  const secondary = `${btn} bg-zinc-100 text-zinc-800 hover:bg-zinc-200`
+  const danger = `${btn} bg-red-50 text-red-700 hover:bg-red-100`
 
   return (
-    <article className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+    <article
+      className={`rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm ${
+        rejected ? 'opacity-60 [&_h3]:line-through' : ''
+      }`}
+    >
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <span
           className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${sourceClass(element.source)}`}
@@ -187,6 +260,11 @@ export function ElementCard({ element }: { element: StudioElement }) {
         {status ? (
           <span className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-zinc-600">
             {STATUS_LABELS[status] ?? status}
+          </span>
+        ) : null}
+        {showAuto ? (
+          <span className="rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-medium text-violet-800">
+            Auto-validé par l’IA
           </span>
         ) : null}
       </div>
@@ -224,6 +302,119 @@ export function ElementCard({ element }: { element: StudioElement }) {
           <p className="mt-2 text-sm leading-6 text-zinc-600">{element.reasoning}</p>
         </details>
       ) : null}
+
+      <div className="mt-4">
+        {citations.length === 0 ? (
+          <span className="inline-flex rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-zinc-500">
+            Hypothèse (sans source)
+          </span>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {citations.map((citation) => {
+              const label = citation.page
+                ? `${citation.filename ?? 'document'}, p.${citation.page}`
+                : (citation.filename ?? 'document')
+              const isOpen = openRef === citation.ref
+              return (
+                <button
+                  key={`${citation.ref}-${citation.chunk_id}`}
+                  type="button"
+                  onClick={() => setOpenRef(isOpen ? null : citation.ref)}
+                  className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                    isOpen
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-indigo-50 text-indigo-800 hover:bg-indigo-100'
+                  }`}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {openCitation?.excerpt ? (
+          <p className="mt-3 rounded-xl bg-zinc-50 px-3 py-2 text-sm leading-6 text-zinc-600">
+            {openCitation.excerpt}
+          </p>
+        ) : null}
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-zinc-100 pt-4">
+        {rejected ? (
+          <button
+            type="button"
+            disabled={disabled}
+            className={primary}
+            onClick={() => void run(() => setStatus(ctx, element.id, 'proposed'), 'Carte restaurée.')}
+          >
+            Restaurer
+          </button>
+        ) : status === 'validated' ? (
+          <>
+            <button type="button" disabled={disabled} className={secondary} onClick={onEdit}>
+              Modifier
+            </button>
+            {showRegen ? (
+              <button type="button" disabled={disabled} className={secondary} onClick={requestRegenerate}>
+                Régénérer
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={disabled}
+              className={secondary}
+              onClick={() =>
+                void run(() => setStatus(ctx, element.id, 'proposed'), 'Validation annulée.')
+              }
+            >
+              Annuler la validation
+            </button>
+            {showAuto && onUndoAuto ? (
+              <button
+                type="button"
+                disabled={disabled}
+                className={danger}
+                onClick={() => void run(() => onUndoAuto(), 'Élément annulé.')}
+              >
+                Annuler
+              </button>
+            ) : null}
+            <button type="button" disabled={disabled} className={secondary} onClick={onExplain}>
+              Pourquoi ça ?
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={disabled}
+              className={primary}
+              onClick={() => void run(() => setStatus(ctx, element.id, 'validated'), 'Carte acceptée.')}
+            >
+              Accepter
+            </button>
+            <button type="button" disabled={disabled} className={secondary} onClick={onEdit}>
+              Modifier
+            </button>
+            {showRegen ? (
+              <button type="button" disabled={disabled} className={secondary} onClick={requestRegenerate}>
+                Régénérer
+              </button>
+            ) : null}
+            <button
+              type="button"
+              disabled={disabled}
+              className={danger}
+              onClick={() => void run(() => setStatus(ctx, element.id, 'rejected'), 'Carte rejetée.')}
+            >
+              Rejeter
+            </button>
+            <button type="button" disabled={disabled} className={secondary} onClick={onExplain}>
+              Pourquoi ça ?
+            </button>
+          </>
+        )}
+      </div>
     </article>
   )
 }
