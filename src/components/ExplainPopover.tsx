@@ -3,14 +3,22 @@
 import { useEffect, useState } from 'react'
 import type { ElementCitation, StudioElement } from '@/components/ElementCard'
 import { logExplainOpened, type ActionCtx } from '@/lib/elementActions'
+import type { BiasReport } from '@/lib/bias'
+
+const SEVERITY: Record<string, { label: string; className: string }> = {
+  low: { label: 'Faible', className: 'bg-zinc-100 text-zinc-600' },
+  medium: { label: 'Moyen', className: 'bg-amber-50 text-amber-800 ring-1 ring-amber-200' },
+  high: { label: 'Élevé', className: 'bg-red-50 text-red-700 ring-1 ring-red-200' },
+}
 
 type ExplainPopoverProps = {
   ctx: ActionCtx
   element: StudioElement
+  biasReport?: BiasReport | null
   onClose: () => void
 }
 
-export function ExplainPopover({ ctx, element, onClose }: ExplainPopoverProps) {
+export function ExplainPopover({ ctx, element, biasReport, onClose }: ExplainPopoverProps) {
   const [openRef, setOpenRef] = useState<string | null>(null)
   const citations = element.citations ?? []
   const openCitation = citations.find((citation) => citation.ref === openRef)
@@ -86,8 +94,42 @@ export function ExplainPopover({ ctx, element, onClose }: ExplainPopoverProps) {
           ) : null}
         </div>
 
-        <p className="mt-6 text-sm text-zinc-400">Analyse des biais : bientôt disponible</p>
+        {element.type === 'persona' ? (
+          <BiasNote element={element} biasReport={biasReport} />
+        ) : null}
       </div>
+    </div>
+  )
+}
+
+function BiasNote({ element, biasReport }: { element: StudioElement; biasReport?: BiasReport | null }) {
+  const name =
+    element.content && typeof element.content === 'object' && typeof element.content.name === 'string'
+      ? element.content.name
+      : ''
+  const flags = (biasReport?.flags?.items ?? []).filter((flag) => flag.persona_name === name)
+
+  if (!biasReport) {
+    return <p className="mt-6 text-sm text-zinc-400">Analyse des biais disponible pour les personas</p>
+  }
+
+  if (flags.length === 0) {
+    return <p className="mt-6 text-sm text-emerald-700">Aucun biais détecté lors de la dernière analyse</p>
+  }
+
+  return (
+    <div className="mt-6 space-y-2">
+      {flags.map((flag, index) => {
+        const severity = SEVERITY[flag.severity] ?? SEVERITY.medium
+        return (
+          <div key={`${flag.issue}-${index}`} className="rounded-xl bg-zinc-50 px-3 py-2">
+            <span className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium ${severity.className}`}>
+              {severity.label}
+            </span>
+            <p className="mt-1 text-sm leading-6 text-zinc-700">{flag.issue}</p>
+          </div>
+        )
+      })}
     </div>
   )
 }

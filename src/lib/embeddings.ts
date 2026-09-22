@@ -1,3 +1,4 @@
+import 'server-only'
 import OpenAI from 'openai'
 
 // 1536 dimensions : doit correspondre à vector(1536) dans le schéma SQL

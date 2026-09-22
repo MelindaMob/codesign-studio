@@ -5,12 +5,13 @@ import type { ElementCitation } from '@/components/ElementCard'
 
 type RegenerateDialogProps = {
   elementId: string
+  initialFeedback?: string
   onClose: () => void
   onDone: (element: Record<string, unknown> & { citations?: ElementCitation[] }) => void
 }
 
-export function RegenerateDialog({ elementId, onClose, onDone }: RegenerateDialogProps) {
-  const [feedback, setFeedback] = useState('')
+export function RegenerateDialog({ elementId, initialFeedback, onClose, onDone }: RegenerateDialogProps) {
+  const [feedback, setFeedback] = useState(initialFeedback ?? '')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

@@ -19,10 +19,9 @@ export type EventType =
   | 'suggestion_dismissed'
   | 'pipeline_started'
   | 'pipeline_completed'
+  | 'agent_arbitration'
   | 'bias_alert_shown'
   | 'bias_alert_acted'
-  | 'agent_arbitration'
-  | 'session_completed'
 
 export async function logEvent(e: {
   sessionId: string
@@ -30,12 +29,12 @@ export async function logEvent(e: {
   type: EventType
   elementId?: string
   payload?: Record<string, unknown>
-}) {
+}): Promise<{ ok: true } | { ok: false; error: unknown }> {
   const supabase = createClient()
   const {
     data: { user },
   } = await supabase.auth.getUser()
-  await supabase.from('events').insert({
+  const { error } = await supabase.from('events').insert({
     session_id: e.sessionId,
     user_id: user?.id,
     mode: e.mode,
@@ -43,4 +42,9 @@ export async function logEvent(e: {
     element_id: e.elementId ?? null,
     payload: e.payload ?? {},
   })
+  if (error) {
+    console.error('logEvent failed:', error, e)
+    return { ok: false, error }
+  }
+  return { ok: true }
 }

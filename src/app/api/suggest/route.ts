@@ -41,9 +41,14 @@ const labelOf = (c: unknown) => {
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const sessionId: string = body.sessionId
-  const type: ElementKind = body.type
+  let body: { sessionId?: string; type?: ElementKind; count?: number }
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Requête invalide' }, { status: 400 })
+  }
+  const sessionId: string = body.sessionId as string
+  const type: ElementKind = body.type as ElementKind
   const count = Math.min(Math.max(Number(body.count) || 4, 2), 6)
 
   if (!CONTEXT_TYPES[type]) return NextResponse.json({ error: 'Type invalide' }, { status: 400 })

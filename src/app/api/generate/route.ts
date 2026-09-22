@@ -40,9 +40,14 @@ type InsertedElement = {
 }
 
 export async function POST(req: NextRequest) {
-  const body = await req.json()
-  const sessionId: string = body.sessionId
-  const type: ElementKind = body.type
+  let body: { sessionId?: string; type?: ElementKind; count?: number }
+  try {
+    body = await req.json()
+  } catch {
+    return new Response('Requête invalide', { status: 400 })
+  }
+  const sessionId: string = body.sessionId as string
+  const type: ElementKind = body.type as ElementKind
   const count = Math.min(Math.max(Number(body.count) || 3, 1), 6)
 
   if (!schemas[type]) return new Response('Type invalide', { status: 400 })
@@ -182,7 +187,7 @@ export async function POST(req: NextRequest) {
           return
         }
 
-        await supabase.from('element_versions').insert({
+        const { error: versionError } = await supabase.from('element_versions').insert({
           element_id: el.id,
           session_id: sessionId,
           version_number: 1,
@@ -190,14 +195,16 @@ export async function POST(req: NextRequest) {
           content,
           author: 'ai',
         })
+        if (versionError) console.error('element_versions insert failed:', versionError)
 
         if (cited.length) {
-          await supabase.from('element_sources').insert(
+          const { error: sourcesError } = await supabase.from('element_sources').insert(
             cited.map((c) => ({ element_id: el.id, chunk_id: c.id, session_id: sessionId }))
           )
+          if (sourcesError) console.error('element_sources insert failed:', sourcesError)
         }
 
-        await supabase.from('events').insert({
+        const { error: eventError } = await supabase.from('events').insert({
           session_id: sessionId,
           user_id: user.id,
           mode: session.mode,
@@ -205,6 +212,7 @@ export async function POST(req: NextRequest) {
           element_id: el.id,
           payload: { type, citations: cited.length },
         })
+        if (eventError) console.error('events insert failed:', eventError)
 
         send({
           type: 'element',
@@ -250,7 +258,7 @@ export async function POST(req: NextRequest) {
         if (buffer.trim()) await handleLine(buffer.trim())
 
         const final = await llm.finalMessage()
-        await supabase.from('agent_runs').insert({
+        const { error: runError } = await supabase.from('agent_runs').insert({
           session_id: sessionId,
           agent_role: 'generator',
           input: { type, count, sources: sources.map((s) => s.id) },
@@ -260,6 +268,7 @@ export async function POST(req: NextRequest) {
           tokens_out: final.usage.output_tokens,
           latency_ms: Date.now() - started,
         })
+        if (runError) console.error('agent_runs insert failed:', runError)
 
         send({ type: 'done' })
       } catch (e) {

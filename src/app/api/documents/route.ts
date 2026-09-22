@@ -10,7 +10,12 @@ const MAX_SIZE = 10 * 1024 * 1024 // 10 Mo
 const MAX_CHUNKS = 300 // garde-fou sur le coût d'embeddings
 
 export async function POST(req: NextRequest) {
-  const form = await req.formData()
+  let form: FormData
+  try {
+    form = await req.formData()
+  } catch {
+    return NextResponse.json({ error: 'Requête invalide' }, { status: 400 })
+  }
   const file = form.get('file') as File | null
   const sessionId = form.get('sessionId') as string | null
 

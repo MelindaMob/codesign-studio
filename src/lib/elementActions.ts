@@ -218,3 +218,21 @@ export async function logSuggestionUsed(ctx: ActionCtx, payload: { type: Element
 export async function logSuggestionDismissed(ctx: ActionCtx, payload: { type: ElementKind; label: string }) {
   await logEvent({ ...ctx, type: 'suggestion_dismissed', payload })
 }
+
+// Arbitrage humain après un débat multi-agents : suivre un avis, ou écrire sa propre décision
+export async function logArbitration(
+  ctx: ActionCtx,
+  elementId: string,
+  payload: { followed: 'ux_researcher' | 'product_manager' | 'tech_lead' | 'own'; note?: string }
+) {
+  await logEvent({ ...ctx, type: 'agent_arbitration', elementId, payload })
+}
+
+// Action de l'utilisateur face à une alerte de biais : régénérer le persona concerné, ou ignorer l'alerte
+export async function logBiasAlertActed(
+  ctx: ActionCtx,
+  elementId: string | null,
+  payload: { action: 'regenerate' | 'dismiss'; issue: string; report_id: string }
+) {
+  await logEvent({ ...ctx, type: 'bias_alert_acted', elementId: elementId ?? undefined, payload })
+}

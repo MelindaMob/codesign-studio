@@ -316,9 +316,9 @@ export function EditDialog({ ctx, type, element, suggestion, onClose, onSaved, o
               </Field>
               <Field label="Autonomie préférée">
                 <select className={inputClass} value={persona.preferred_autonomy} onChange={(e) => setPersona({ ...persona, preferred_autonomy: e.target.value as PersonaDraft['preferred_autonomy'] })}>
-                  <option value="suggest">suggest</option>
-                  <option value="draft">draft</option>
-                  <option value="act">act</option>
+                  <option value="suggest">Suggère</option>
+                  <option value="draft">Rédige</option>
+                  <option value="act">Agit seule</option>
                 </select>
               </Field>
             </>
@@ -352,9 +352,9 @@ export function EditDialog({ ctx, type, element, suggestion, onClose, onSaved, o
                     </Field>
                     <Field label="Émotion">
                       <select className={inputClass} value={step.emotion} onChange={(e) => setJourney({ ...journey, steps: patchStep(journey.steps, index, { emotion: e.target.value as StepDraft['emotion'] }) })}>
-                        <option value="happy">happy</option>
-                        <option value="neutral">neutral</option>
-                        <option value="frustrated">frustrated</option>
+                        <option value="happy">Satisfait</option>
+                        <option value="neutral">Neutre</option>
+                        <option value="frustrated">Frustré</option>
                       </select>
                     </Field>
                     <Field label="Point de douleur">

@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import { signOut } from './actions'
 import { NewSessionButton } from './new-session-button'
+import { ModeLabel } from '@/components/AutonomySelector'
 
 type SessionRow = {
   id: string
@@ -75,7 +76,7 @@ export default async function SessionsPage() {
                   </p>
                 </div>
                 <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium tracking-wide text-indigo-700 uppercase">
-                  {session.mode}
+                  <ModeLabel mode={session.mode} />
                 </span>
               </Link>
             </li>

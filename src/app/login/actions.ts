@@ -17,6 +17,15 @@ const credentialsSchema = z.object({
     .min(6, 'Le mot de passe doit contenir au moins 6 caractères.'),
 })
 
+function authErrorMessage(message: string) {
+  const map: Record<string, string> = {
+    'Invalid login credentials': 'Email ou mot de passe incorrect',
+    'User already registered': 'Un compte existe déjà avec cet email',
+    'Email not confirmed': 'Email non confirmé',
+  }
+  return map[message] ?? 'Connexion impossible. Réessaie.'
+}
+
 function parseCredentials(formData: FormData) {
   return credentialsSchema.safeParse({
     email: String(formData.get('email') ?? '').trim(),
@@ -37,7 +46,7 @@ export async function login(
   const { error } = await supabase.auth.signInWithPassword(parsed.data)
 
   if (error) {
-    return { error: error.message, message: null }
+    return { error: authErrorMessage(error.message), message: null }
   }
 
   revalidatePath('/', 'layout')
@@ -57,7 +66,7 @@ export async function signup(
   const { data, error } = await supabase.auth.signUp(parsed.data)
 
   if (error) {
-    return { error: error.message, message: null }
+    return { error: authErrorMessage(error.message), message: null }
   }
 
   if (!data.session) {

@@ -16,7 +16,13 @@ const CONTEXT_TYPES: Record<ElementKind, ElementKind[]> = {
 }
 
 export async function POST(req: NextRequest) {
-  const { elementId, feedback } = (await req.json()) as { elementId: string; feedback?: string }
+  let body: { elementId: string; feedback?: string }
+  try {
+    body = (await req.json()) as { elementId: string; feedback?: string }
+  } catch {
+    return NextResponse.json({ error: 'Requête invalide' }, { status: 400 })
+  }
+  const { elementId, feedback } = body
   const cleanFeedback = feedback?.trim().slice(0, 500) || null
 
   const apiKey = process.env.ANTHROPIC_API_KEY
@@ -168,11 +174,23 @@ export async function POST(req: NextRequest) {
   }
 
   // Citations : on remplace les anciennes
-  await supabase.from('element_sources').delete().eq('element_id', elementId)
+  let citationsPersistFailed = false
+  const { error: deleteSourcesError } = await supabase
+    .from('element_sources')
+    .delete()
+    .eq('element_id', elementId)
+  if (deleteSourcesError) {
+    console.error('element_sources delete failed:', deleteSourcesError)
+    citationsPersistFailed = true
+  }
   if (cited.length) {
-    await supabase
+    const { error: insertSourcesError } = await supabase
       .from('element_sources')
       .insert(cited.map((c) => ({ element_id: elementId, chunk_id: c.id, session_id: sessionId })))
+    if (insertSourcesError) {
+      console.error('element_sources insert failed:', insertSourcesError)
+      citationsPersistFailed = true
+    }
   }
 
   // Nouvelle version (l'ancienne, y compris les retouches humaines, reste dans l'historique)
@@ -184,7 +202,7 @@ export async function POST(req: NextRequest) {
     .order('version_number', { ascending: false })
     .limit(1)
 
-  await supabase.from('element_versions').insert({
+  const { error: versionError } = await supabase.from('element_versions').insert({
     element_id: elementId,
     session_id: sessionId,
     version_number: (last?.[0]?.version_number ?? 0) + 1,
@@ -192,8 +210,9 @@ export async function POST(req: NextRequest) {
     content,
     author: 'ai',
   })
+  if (versionError) console.error('element_versions insert failed:', versionError)
 
-  await supabase.from('events').insert({
+  const { error: eventError } = await supabase.from('events').insert({
     session_id: sessionId,
     user_id: user.id,
     mode: session.mode,
@@ -201,8 +220,9 @@ export async function POST(req: NextRequest) {
     element_id: elementId,
     payload: { feedback: cleanFeedback, previous_source: element.source, citations: cited.length },
   })
+  if (eventError) console.error('events insert failed:', eventError)
 
-  await supabase.from('agent_runs').insert({
+  const { error: runError } = await supabase.from('agent_runs').insert({
     session_id: sessionId,
     agent_role: 'generator',
     input: { regenerate: elementId, feedback: cleanFeedback, sources: sources.map((s) => s.id) },
@@ -212,17 +232,20 @@ export async function POST(req: NextRequest) {
     tokens_out: tokensOut,
     latency_ms: Date.now() - started,
   })
+  if (runError) console.error('agent_runs insert failed:', runError)
 
   return NextResponse.json({
     element: {
       ...updated,
-      citations: cited.map((c) => ({
-        ref: c.ref,
-        chunk_id: c.id,
-        filename: c.filename,
-        page: c.page,
-        excerpt: c.content.slice(0, 300),
-      })),
+      citations: citationsPersistFailed
+        ? []
+        : cited.map((c) => ({
+            ref: c.ref,
+            chunk_id: c.id,
+            filename: c.filename,
+            page: c.page,
+            excerpt: c.content.slice(0, 300),
+          })),
     },
   })
 }

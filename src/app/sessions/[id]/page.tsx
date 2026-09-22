@@ -2,8 +2,10 @@
 
 import Link from 'next/link'
 import { use, useEffect, useMemo, useState } from 'react'
+import { AgentDebate } from '@/components/AgentDebate'
 import { AuditLog } from '@/components/AuditLog'
 import { AutonomySelector } from '@/components/AutonomySelector'
+import { BiasPanel } from '@/components/BiasPanel'
 import { DocumentsPanel } from '@/components/DocumentsPanel'
 import { EditDialog } from '@/components/EditDialog'
 import {
@@ -23,6 +25,8 @@ import {
 } from '@/lib/elementActions'
 import { generateElements } from '@/lib/generate'
 import { runPipeline } from '@/lib/pipeline'
+import type { AgentOpinion } from '@/lib/debate'
+import type { BiasReport } from '@/lib/bias'
 import type { ElementKind } from '@/lib/schemas'
 import { fetchSuggestions, type Suggestion } from '@/lib/suggest'
 import { createClient } from '@/lib/supabase/client'
@@ -36,8 +40,8 @@ type SessionInfo = {
 
 const COLUMNS: { type: ElementKind; title: string; action: string }[] = [
   { type: 'persona', title: 'Personas', action: 'Générer 3 personas' },
-  { type: 'journey', title: 'Journeys', action: 'Générer 3 journeys' },
-  { type: 'feature', title: 'Features', action: 'Générer 3 features' },
+  { type: 'journey', title: 'Parcours', action: 'Générer 3 parcours' },
+  { type: 'feature', title: 'Fonctionnalités', action: 'Générer 3 fonctionnalités' },
 ]
 
 type NestedDocument = { filename?: string | null } | { filename?: string | null }[] | null
@@ -129,6 +133,9 @@ export default function SessionPage({
   const [pipelineStep, setPipelineStep] = useState<string | null>(null)
   const [pipelineError, setPipelineError] = useState<string | null>(null)
   const [pipelineBanner, setPipelineBanner] = useState<string | null>(null)
+  const [opinionsByFeature, setOpinionsByFeature] = useState<Record<string, AgentOpinion[]>>({})
+  const [biasReport, setBiasReport] = useState<BiasReport | null>(null)
+  const [regenFeedback, setRegenFeedback] = useState<string | undefined>()
 
   useEffect(() => {
     if (!toast) return
@@ -202,6 +209,42 @@ export default function SessionPage({
       feature: elements.filter((el) => el.type === 'feature'),
     }
   }, [elements])
+
+  const featureIdsKey = useMemo(
+    () =>
+      elements
+        .filter((el) => el.type === 'feature')
+        .map((el) => el.id)
+        .sort()
+        .join(','),
+    [elements]
+  )
+
+  useEffect(() => {
+    const featureIds = featureIdsKey ? featureIdsKey.split(',') : []
+    if (!featureIds.length) {
+      setOpinionsByFeature({})
+      return
+    }
+
+    let cancelled = false
+
+    async function loadOpinions() {
+      const supabase = createClient()
+      const { data } = await supabase.from('agent_opinions').select('*').in('element_id', featureIds)
+      if (cancelled) return
+      const grouped: Record<string, AgentOpinion[]> = {}
+      for (const row of (data as AgentOpinion[] | null) ?? []) {
+        grouped[row.element_id] = [...(grouped[row.element_id] ?? []), row]
+      }
+      setOpinionsByFeature(grouped)
+    }
+
+    void loadOpinions()
+    return () => {
+      cancelled = true
+    }
+  }, [featureIdsKey])
 
   const ctx: ActionCtx = useMemo(
     () => ({
@@ -557,6 +600,21 @@ export default function SessionPage({
                   </p>
                 ) : null}
 
+                {column.type === 'persona' ? (
+                  <BiasPanel
+                    sessionId={session.id}
+                    ctx={ctx}
+                    personaCount={grouped.persona.filter((item) => item.status !== 'rejected').length}
+                    onReportChange={setBiasReport}
+                    onRegenerate={(elementId, feedback) => {
+                      const target = elements.find((item) => item.id === elementId)
+                      if (!target) return
+                      setRegenFeedback(feedback)
+                      setRegenElement(target)
+                    }}
+                  />
+                ) : null}
+
                 {chips.length > 0 ? (
                   <div className="flex flex-col gap-2">
                     {chips.map((chip) => (
@@ -603,22 +661,37 @@ export default function SessionPage({
                     </p>
                   ) : null}
                   {items.map((element) => (
-                    <ElementCard
-                      key={element.id}
-                      element={element}
-                      ctx={ctx}
-                      locked={busy}
-                      autoAccepted={autoAcceptedIds.has(element.id)}
-                      onUpdated={(row) => {
-                        mergeRow(row)
-                        bumpAudit()
-                      }}
-                      onEdit={() => setEditState({ mode: 'edit', element })}
-                      onRegenerate={() => setRegenElement(element)}
-                      onExplain={() => setExplainElement(element)}
-                      onToast={showToast}
-                      onUndoAuto={() => undoAutoAccepted(element.id)}
-                    />
+                    <div key={element.id} className="flex flex-col gap-3">
+                      <ElementCard
+                        element={element}
+                        ctx={ctx}
+                        locked={busy}
+                        autoAccepted={autoAcceptedIds.has(element.id)}
+                        onUpdated={(row) => {
+                          mergeRow(row)
+                          bumpAudit()
+                        }}
+                        onEdit={() => setEditState({ mode: 'edit', element })}
+                        onRegenerate={() => {
+                          setRegenFeedback(undefined)
+                          setRegenElement(element)
+                        }}
+                        onExplain={() => setExplainElement(element)}
+                        onToast={showToast}
+                        onUndoAuto={() => undoAutoAccepted(element.id)}
+                      />
+                      {column.type === 'feature' && element.status !== 'rejected' ? (
+                        <AgentDebate
+                          element={element}
+                          ctx={ctx}
+                          opinions={opinionsByFeature[element.id] ?? []}
+                          onOpinionsChange={(opinions) => {
+                            setOpinionsByFeature((prev) => ({ ...prev, [element.id]: opinions }))
+                          }}
+                          onArbitrated={bumpAudit}
+                        />
+                      ) : null}
+                    </div>
                   ))}
                 </div>
 
@@ -672,8 +745,13 @@ export default function SessionPage({
 
       {regenElement ? (
         <RegenerateDialog
+          key={`${regenElement.id}-${regenFeedback ?? ''}`}
           elementId={regenElement.id}
-          onClose={() => setRegenElement(null)}
+          initialFeedback={regenFeedback}
+          onClose={() => {
+            setRegenElement(null)
+            setRegenFeedback(undefined)
+          }}
           onDone={(row) => {
             mergeRow(row, row.citations)
             bumpAudit()
@@ -686,6 +764,7 @@ export default function SessionPage({
         <ExplainPopover
           ctx={ctx}
           element={elements.find((item) => item.id === explainElement.id) ?? explainElement}
+          biasReport={biasReport}
           onClose={() => setExplainElement(null)}
         />
       ) : null}

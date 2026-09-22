@@ -6,7 +6,7 @@ import type { ElementKind } from '@/lib/schemas'
 const STEPS: { type: ElementKind; count: number; label: string }[] = [
   { type: 'persona', count: 3, label: 'Personas' },
   { type: 'journey', count: 3, label: 'Parcours' },
-  { type: 'feature', count: 4, label: 'Features' },
+  { type: 'feature', count: 4, label: 'Fonctionnalités' },
 ]
 
 type Handlers = {

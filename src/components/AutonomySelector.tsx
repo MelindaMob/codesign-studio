@@ -2,10 +2,16 @@
 
 import { changeMode, type ActionCtx } from '@/lib/elementActions'
 
+export const MODE_LABELS: Record<ActionCtx['mode'], string> = {
+  suggest: 'Suggère',
+  draft: 'Rédige',
+  act: 'Agit seule',
+}
+
 const OPTIONS: { value: ActionCtx['mode']; label: string }[] = [
-  { value: 'suggest', label: 'Suggère' },
-  { value: 'draft', label: 'Rédige' },
-  { value: 'act', label: 'Agit seule' },
+  { value: 'suggest', label: MODE_LABELS.suggest },
+  { value: 'draft', label: MODE_LABELS.draft },
+  { value: 'act', label: MODE_LABELS.act },
 ]
 
 const DESCRIPTIONS: Record<ActionCtx['mode'], string> = {
@@ -66,4 +72,10 @@ export function AutonomySelector({
       <p className="mt-2 text-sm text-zinc-500">{DESCRIPTIONS[ctx.mode]}</p>
     </div>
   )
+}
+
+export function ModeLabel({ mode }: { mode: string }) {
+  const label =
+    mode === 'suggest' || mode === 'draft' || mode === 'act' ? MODE_LABELS[mode] : mode
+  return <>{label}</>
 }
