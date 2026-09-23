@@ -14,7 +14,9 @@ import {
   type StudioElement,
 } from '@/components/ElementCard'
 import { ExplainPopover } from '@/components/ExplainPopover'
+import { JourneyCanvas } from '@/components/JourneyCanvas'
 import { PriorityMatrix } from '@/components/PriorityMatrix'
+import { ProductCanvas } from '@/components/ProductCanvas'
 import { RegenerateDialog } from '@/components/RegenerateDialog'
 import {
   autoAccept,
@@ -124,6 +126,7 @@ export default function SessionPage({
   >(null)
   const [regenElement, setRegenElement] = useState<StudioElement | null>(null)
   const [explainElement, setExplainElement] = useState<StudioElement | null>(null)
+  const [canvasJourney, setCanvasJourney] = useState<StudioElement | null>(null)
   const [autoAcceptedIds, setAutoAcceptedIds] = useState<Set<string>>(new Set())
   const [auditKey, setAuditKey] = useState(0)
   const [suggestions, setSuggestions] = useState<Partial<Record<ElementKind, Suggestion[]>>>({})
@@ -514,6 +517,19 @@ export default function SessionPage({
           </div>
         </details>
 
+        <details className="rounded-2xl border border-zinc-200 bg-white p-6">
+          <summary className="cursor-pointer text-sm font-semibold text-zinc-900">Canvas produit</summary>
+          <div className="mt-5">
+            <ProductCanvas
+              sessionId={session.id}
+              brief={session.brief ?? brief}
+              personas={grouped.persona.filter((item) => item.status === 'validated')}
+              features={grouped.feature.filter((item) => item.status !== 'rejected')}
+              risks={[]}
+            />
+          </div>
+        </details>
+
         {actMode ? (
           <section className="rounded-2xl border border-zinc-200 bg-white p-6">
             <div className="flex flex-wrap items-center gap-3">
@@ -691,6 +707,15 @@ export default function SessionPage({
                           onArbitrated={bumpAudit}
                         />
                       ) : null}
+                      {column.type === 'journey' && element.status !== 'rejected' ? (
+                        <button
+                          type="button"
+                          onClick={() => setCanvasJourney(element)}
+                          className="h-9 self-start rounded-lg bg-zinc-100 px-3 text-xs font-medium text-zinc-800 hover:bg-zinc-200"
+                        >
+                          Voir en canvas
+                        </button>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -766,6 +791,13 @@ export default function SessionPage({
           element={elements.find((item) => item.id === explainElement.id) ?? explainElement}
           biasReport={biasReport}
           onClose={() => setExplainElement(null)}
+        />
+      ) : null}
+
+      {canvasJourney ? (
+        <JourneyCanvas
+          journey={elements.find((item) => item.id === canvasJourney.id) ?? canvasJourney}
+          onClose={() => setCanvasJourney(null)}
         />
       ) : null}
 
